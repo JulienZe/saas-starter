@@ -1,24 +1,35 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Clock, Search, Bookmark, BookmarkCheck, Trash2, Sparkles,
   BookOpen, PenLine, ChevronRight, BarChart3, Star, Heart,
-  Download, Copy, CheckCircle, Eye, X
+  Download, Copy, CheckCircle, Eye, X, Loader2
 } from 'lucide-react';
 
-interface HistoryItem {
-  id: string;
-  productName: string;
-  productDesc: string;
+interface DBStory {
+  id: number;
+  productName: string | null;
+  productDesc: string | null;
   template: string | null;
-  tone: string;
-  targetUser: string;
-  result: any;
-  isFavorite: boolean;
+  tone: string | null;
+  targetUser: string | null;
+  resultData: any;
+  isFavorite: number;
   rating: number;
+  wordCount: number | null;
+  provider: string | null;
+  model: string | null;
+  content: string | null;
   createdAt: string;
+}
+
+interface Stats {
+  total: number;
+  totalWords: number;
+  avgWords: number;
+  favCount: number;
 }
 
 const TEMPLATES: Record<string, { name: string; icon: string }> = {
@@ -33,60 +44,68 @@ const TEMPLATES: Record<string, { name: string; icon: string }> = {
 export default function HistoryPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'favorites'>('all');
-  const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
+  const [previewItem, setPreviewItem] = useState<DBStory | null>(null);
   const [copied, setCopied] = useState(false);
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    if (typeof window === 'undefined') return [];
+  const [stories, setStories] = useState<DBStory[]>([]);
+  const [stats, setStats] = useState<Stats>({ total: 0, totalWords: 0, avgWords: 0, favCount: 0 });
+  const [loading, setLoading] = useState(true);
+
+  const fetchStories = useCallback(async () => {
     try {
-      return JSON.parse(localStorage.getItem('brand-story-history') || '[]');
-    } catch { return []; }
-  });
-
-  const filtered = useMemo(() => {
-    let list = history;
-    if (search) {
-      list = list.filter(h => h.productName.toLowerCase().includes(search.toLowerCase()) || h.productDesc.toLowerCase().includes(search.toLowerCase()));
+      const params = new URLSearchParams();
+      if (search) params.set('search', search);
+      if (filter === 'favorites') params.set('favorites', 'true');
+      const res = await fetch(`/api/stories?${params}`);
+      const data = await res.json();
+      if (data.stories) setStories(data.stories);
+      if (data.stats) setStats(data.stats);
+    } catch (err) {
+      console.error('加载历史记录失败:', err);
+    } finally {
+      setLoading(false);
     }
-    if (filter === 'favorites') {
-      list = list.filter(h => h.isFavorite);
+  }, [search, filter]);
+
+  useEffect(() => {
+    fetchStories();
+  }, [fetchStories]);
+
+  const toggleFavorite = useCallback(async (id: number, currentFav: number) => {
+    const newFav = currentFav ? 0 : 1;
+    setStories(prev => prev.map(s => s.id === id ? { ...s, isFavorite: newFav } : s));
+    try {
+      await fetch('/api/stories', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, isFavorite: !!newFav }),
+      });
+    } catch {
+      setStories(prev => prev.map(s => s.id === id ? { ...s, isFavorite: currentFav } : s));
     }
-    return list;
-  }, [history, search, filter]);
-
-  const stats = useMemo(() => {
-    const totalWords = history.reduce((sum, h) => sum + (h.result?.brandStory?.wordCount || 0), 0);
-    return {
-      total: history.length,
-      totalWords,
-      avgWords: history.length > 0 ? Math.round(totalWords / history.length) : 0,
-      favCount: history.filter(h => h.isFavorite).length,
-    };
-  }, [history]);
-
-  const toggleFavorite = useCallback((id: string) => {
-    setHistory(prev => {
-      const updated = prev.map(h => h.id === id ? { ...h, isFavorite: !h.isFavorite } : h);
-      localStorage.setItem('brand-story-history', JSON.stringify(updated));
-      return updated;
-    });
   }, []);
 
-  const updateRating = useCallback((id: string, rating: number) => {
-    setHistory(prev => {
-      const updated = prev.map(h => h.id === id ? { ...h, rating } : h);
-      localStorage.setItem('brand-story-history', JSON.stringify(updated));
-      return updated;
-    });
+  const updateRating = useCallback(async (id: number, rating: number) => {
+    setStories(prev => prev.map(s => s.id === id ? { ...s, rating } : s));
+    try {
+      await fetch('/api/stories', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, rating }),
+      });
+    } catch {
+      console.error('更新评分失败');
+    }
   }, []);
 
-  const deleteItem = useCallback((id: string) => {
-    setHistory(prev => {
-      const updated = prev.filter(h => h.id !== id);
-      localStorage.setItem('brand-story-history', JSON.stringify(updated));
-      return updated;
-    });
+  const deleteItem = useCallback(async (id: number) => {
+    setStories(prev => prev.filter(s => s.id !== id));
     if (previewItem?.id === id) setPreviewItem(null);
-  }, [previewItem]);
+    try {
+      await fetch(`/api/stories?id=${id}`, { method: 'DELETE' });
+    } catch {
+      fetchStories();
+    }
+  }, [previewItem, fetchStories]);
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -95,16 +114,24 @@ export default function HistoryPage() {
     });
   };
 
-  const handleExport = (item: HistoryItem) => {
-    const content = `# ${item.productName} - 品牌故事\n\n${item.result?.brandStory?.content || ''}`;
+  const handleExport = (item: DBStory) => {
+    const content = `# ${item.productName || '品牌故事'}\n\n${item.content || item.resultData?.brandStory?.content || ''}`;
     const blob = new Blob([content], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${item.productName}-品牌故事.md`;
+    a.download = `${item.productName || '品牌故事'}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="w-8 h-8 text-[#667eea] animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8">
@@ -119,7 +146,7 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      {history.length > 0 && (
+      {stats.total > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           {[
             { label: '创作总数', value: stats.total, icon: BookOpen, gradient: 'from-[#667eea] to-[#764ba2]' },
@@ -174,10 +201,11 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      {filtered.length > 0 ? (
+      {stories.length > 0 ? (
         <div className="space-y-2">
-          {filtered.map((item) => {
+          {stories.map((item) => {
             const template = item.template ? TEMPLATES[item.template] : null;
+            const wordCount = item.wordCount || item.resultData?.brandStory?.wordCount || 0;
             return (
               <div
                 key={item.id}
@@ -189,24 +217,27 @@ export default function HistoryPage() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-gray-900 text-sm truncate">{item.productName}</h3>
-                    {item.isFavorite && <Heart className="w-3 h-3 text-pink-500 fill-pink-500 flex-shrink-0" />}
+                    <h3 className="font-semibold text-gray-900 text-sm truncate">{item.productName || '未命名'}</h3>
+                    {item.isFavorite ? <Heart className="w-3 h-3 text-pink-500 fill-pink-500 flex-shrink-0" /> : null}
                   </div>
                   <p className="text-xs text-gray-400 truncate mt-0.5">{item.productDesc}</p>
                   <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400">
                     <span>{new Date(item.createdAt).toLocaleDateString('zh-CN')}</span>
-                    {item.result?.brandStory?.wordCount > 0 && <span>{item.result.brandStory.wordCount}字</span>}
+                    {wordCount > 0 && <span>{wordCount}字</span>}
                     {template && <span className="text-[#667eea]">{template.name}</span>}
                     {item.rating > 0 && (
                       <span className="flex items-center gap-0.5">
                         <Star className="w-3 h-3 text-[#667eea] fill-[#667eea]" /> {item.rating}
                       </span>
                     )}
+                    {item.provider && item.provider !== 'mock' && (
+                      <span className="text-gray-300">{item.provider}</span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                   <button
-                    onClick={() => toggleFavorite(item.id)}
+                    onClick={() => toggleFavorite(item.id, item.isFavorite)}
                     className={`p-2 rounded-lg transition-colors ${
                       item.isFavorite ? 'text-pink-500 bg-pink-50' : 'text-gray-400 hover:text-pink-500 hover:bg-pink-50'
                     }`}
@@ -233,7 +264,7 @@ export default function HistoryPage() {
               </div>
             );
           })}
-          <p className="text-center text-xs text-gray-400 mt-4">共 {filtered.length} 条记录</p>
+          <p className="text-center text-xs text-gray-400 mt-4">共 {stories.length} 条记录</p>
         </div>
       ) : (
         <div className="text-center py-16">
@@ -260,10 +291,15 @@ export default function HistoryPage() {
           <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-[#667eea]/[0.03] to-[#764ba2]/[0.03]">
               <div className="flex items-center gap-3">
-                <h3 className="font-semibold text-gray-900">{previewItem.productName}</h3>
+                <h3 className="font-semibold text-gray-900">{previewItem.productName || '品牌故事'}</h3>
                 {previewItem.template && TEMPLATES[previewItem.template] && (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-gradient-to-r from-[#667eea]/5 to-[#764ba2]/5 text-[#667eea]">
                     {TEMPLATES[previewItem.template].icon} {TEMPLATES[previewItem.template].name}
+                  </span>
+                )}
+                {previewItem.provider && previewItem.provider !== 'mock' && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                    {previewItem.provider} / {previewItem.model}
                   </span>
                 )}
               </div>
@@ -274,7 +310,7 @@ export default function HistoryPage() {
             <div className="p-6 overflow-y-auto max-h-[60vh]">
               <div className="flex items-center gap-4 mb-4 text-sm text-gray-500">
                 <span>{new Date(previewItem.createdAt).toLocaleDateString('zh-CN')}</span>
-                {previewItem.result?.brandStory?.wordCount > 0 && <span>{previewItem.result.brandStory.wordCount}字</span>}
+                {(previewItem.wordCount || 0) > 0 && <span>{previewItem.wordCount}字</span>}
               </div>
               <div className="flex items-center gap-2 mb-4">
                 <span className="text-xs text-gray-400">评分</span>
@@ -290,14 +326,14 @@ export default function HistoryPage() {
                   ))}
                 </div>
               </div>
-              {previewItem.result?.productValue?.coreValue && (
+              {previewItem.resultData?.productValue?.coreValue && (
                 <div className="mb-4 p-3 rounded-xl bg-gradient-to-r from-[#667eea]/5 to-[#764ba2]/5">
                   <p className="text-xs text-[#667eea] font-medium mb-1">核心价值</p>
-                  <p className="text-sm text-gray-700">{previewItem.result.productValue.coreValue}</p>
+                  <p className="text-sm text-gray-700">{previewItem.resultData.productValue.coreValue}</p>
                 </div>
               )}
               <article className="text-gray-700 leading-[1.8] text-sm">
-                {(previewItem.result?.brandStory?.content || '').split('\n').map((line: string, i: number) => {
+                {(previewItem.content || previewItem.resultData?.brandStory?.content || '').split('\n').map((line: string, i: number) => {
                   if (!line.trim()) return <div key={i} className="h-2" />;
                   if (line.startsWith('# ')) return <h2 key={i} className="text-lg font-bold text-gray-900 mt-4 mb-2">{line.slice(2)}</h2>;
                   if (line.startsWith('## ')) return <h3 key={i} className="font-semibold text-gray-800 mt-3 mb-1.5">{line.slice(3)}</h3>;
@@ -308,7 +344,7 @@ export default function HistoryPage() {
               </article>
             </div>
             <div className="flex justify-end gap-2 px-6 py-4 border-t bg-gray-50">
-              <Button variant="ghost" onClick={() => handleCopy(previewItem.result?.brandStory?.content || '')}>
+              <Button variant="ghost" onClick={() => handleCopy(previewItem.content || previewItem.resultData?.brandStory?.content || '')}>
                 {copied ? <><CheckCircle className="w-4 h-4 mr-1 text-[#667eea]" /> 已复制</> : <><Copy className="w-4 h-4 mr-1" /> 复制</>}
               </Button>
               <Button variant="outline" onClick={() => handleExport(previewItem)}>

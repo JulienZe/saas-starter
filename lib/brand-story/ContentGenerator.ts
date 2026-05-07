@@ -15,6 +15,8 @@ export interface GenerationResult {
   tokensUsed?: { input: number; output: number };
 }
 
+export type StreamCallback = (chunk: string, done: boolean) => void;
+
 export class ContentGenerator {
   private config: ContentGeneratorConfig;
   private generationHistory: GenerationResult[] = [];
@@ -69,6 +71,277 @@ export class ContentGenerator {
       });
       throw error;
     }
+  }
+
+  async generateStream(prompt: any, options: any = {}, onChunk?: StreamCallback): Promise<any> {
+    const startTime = Date.now();
+    const provider = this.config.provider;
+
+    try {
+      let result: any;
+      const isStreamable = ['openai', 'deepseek', 'siliconflow', 'ollama', 'claude'].includes(provider);
+
+      if (isStreamable && onChunk) {
+        result = await this._generateStreamWithProvider(prompt, options, onChunk);
+      } else if (provider === 'mock' && onChunk) {
+        result = await this._generateStreamWithMock(prompt, options, onChunk);
+      } else {
+        result = await this.generate(prompt, options);
+        if (onChunk) {
+          const text = typeof result === 'object' ? JSON.stringify(result) : String(result);
+          onChunk(text, true);
+        }
+        return result;
+      }
+
+      this.generationHistory.push({
+        success: true,
+        provider: this.config.provider,
+        model: this.config.model || 'unknown',
+        duration: Date.now() - startTime,
+        data: result,
+      });
+
+      return result;
+    } catch (error: any) {
+      this.generationHistory.push({
+        success: false,
+        provider: this.config.provider,
+        model: this.config.model || 'unknown',
+        duration: Date.now() - startTime,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  private async _generateStreamWithProvider(prompt: any, options: any, onChunk: StreamCallback): Promise<any> {
+    const provider = this.config.provider;
+    const systemPrompt = typeof prompt === 'object' ? prompt.system : '';
+    const userPrompt = typeof prompt === 'object' ? prompt.user : prompt;
+
+    if (provider === 'claude') {
+      return this._streamClaude(systemPrompt, userPrompt, options, onChunk);
+    }
+
+    if (provider === 'ollama') {
+      return this._streamOllama(systemPrompt, userPrompt, options, onChunk);
+    }
+
+    const baseUrls: Record<string, string> = {
+      openai: 'https://api.openai.com',
+      deepseek: 'https://api.deepseek.com',
+      siliconflow: 'https://api.siliconflow.cn/v1',
+    };
+
+    const defaultModels: Record<string, string> = {
+      openai: 'gpt-4',
+      deepseek: 'deepseek-chat',
+      siliconflow: 'Qwen/Qwen2.5-7B-Instruct',
+    };
+
+    const url = `${this.config.baseUrl || baseUrls[provider]}/v1/chat/completions`;
+    const body: any = {
+      model: options.model || this.config.model || defaultModels[provider],
+      messages: [
+        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: options.temperature || 0.7,
+      max_tokens: options.maxTokens || 2000,
+      stream: true,
+    };
+
+    if (provider !== 'siliconflow') {
+      body.response_format = { type: 'json_object' };
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`${provider} API 错误 (${response.status}): ${errorData?.error?.message || response.statusText}`);
+    }
+
+    return this._parseOpenAIStream(response, onChunk);
+  }
+
+  private async _parseOpenAIStream(response: Response, onChunk: StreamCallback): Promise<any> {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('无法获取响应流');
+
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            fullContent += delta;
+            onChunk(delta, false);
+          }
+        } catch {}
+      }
+    }
+
+    onChunk('', true);
+
+    try {
+      return JSON.parse(fullContent);
+    } catch {
+      return { content: fullContent };
+    }
+  }
+
+  private async _streamClaude(systemPrompt: string, userPrompt: string, options: any, onChunk: StreamCallback): Promise<any> {
+    const response = await fetch(`${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': this.config.apiKey!,
+        'anthropic-version': '2024-10-22',
+      },
+      body: JSON.stringify({
+        model: options.model || this.config.model || 'claude-3-5-sonnet-20241022',
+        max_tokens: options.maxTokens || 2000,
+        temperature: options.temperature || 0.7,
+        stream: true,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`Claude API 错误 (${response.status}): ${errorData?.error?.message || response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('无法获取响应流');
+
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+            fullContent += parsed.delta.text;
+            onChunk(parsed.delta.text, false);
+          }
+        } catch {}
+      }
+    }
+
+    onChunk('', true);
+
+    try {
+      return JSON.parse(fullContent);
+    } catch {
+      return { content: fullContent };
+    }
+  }
+
+  private async _streamOllama(systemPrompt: string, userPrompt: string, options: any, onChunk: StreamCallback): Promise<any> {
+    const baseUrl = this.config.baseUrl || 'http://localhost:11434';
+    const fullPrompt = systemPrompt ? `${systemPrompt}\n\n---\n\n${userPrompt}` : userPrompt;
+
+    const response = await fetch(`${baseUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: options.model || this.config.model || 'qwen2.5:7b',
+        prompt: fullPrompt,
+        stream: true,
+        options: { temperature: options.temperature || 0.7, num_predict: options.maxTokens || 2000 },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama API 错误 (${response.status})`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('无法获取响应流');
+
+    const decoder = new TextDecoder();
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(l => l.trim());
+
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.response) {
+            fullContent += parsed.response;
+            onChunk(parsed.response, false);
+          }
+        } catch {}
+      }
+    }
+
+    onChunk('', true);
+
+    try {
+      return JSON.parse(fullContent);
+    } catch {
+      return { content: fullContent };
+    }
+  }
+
+  private async _generateStreamWithMock(prompt: any, options: any, onChunk: StreamCallback): Promise<any> {
+    const result = await this._generateWithMock(prompt, options);
+    const text = typeof result === 'object' ? JSON.stringify(result) : String(result);
+
+    const chunkSize = 8;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      const chunk = text.slice(i, i + chunkSize);
+      onChunk(chunk, false);
+      await this._delay(30 + Math.random() * 50);
+    }
+
+    onChunk('', true);
+    return result;
   }
 
   private async _generateWithMock(prompt: any, options: any): Promise<any> {

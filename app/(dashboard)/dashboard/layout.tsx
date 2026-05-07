@@ -4,10 +4,11 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { ErrorBoundary } from '@/components/error-boundary';
 import {
   Users, Settings, Shield, Activity, Menu, Sparkles,
   Clock, BookOpen, PenLine, BarChart3, Palette, LayoutDashboard,
-  ChevronLeft
+  ChevronLeft, Building2
 } from 'lucide-react';
 
 export default function DashboardLayout({
@@ -31,6 +32,12 @@ export default function DashboardLayout({
         { href: '/dashboard/brand-story', icon: PenLine, label: '开始创作' },
         { href: '/dashboard/brand-story/history', icon: Clock, label: '创作历史' },
         { href: '/dashboard/brand-story/visual', icon: Palette, label: '视觉资产' },
+      ]
+    },
+    {
+      title: '品牌管理',
+      items: [
+        { href: '/dashboard/brands', icon: Building2, label: '品牌库' },
       ]
     },
     {
@@ -111,7 +118,11 @@ export default function DashboardLayout({
           </nav>
         </aside>
 
-        <main className="flex-1 overflow-y-auto p-0 lg:p-4 bg-[#f6f6f6]">{children}</main>
+        <main className="flex-1 overflow-y-auto p-0 lg:p-4 bg-[#f6f6f6]">
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
+        </main>
       </div>
     </div>
   );

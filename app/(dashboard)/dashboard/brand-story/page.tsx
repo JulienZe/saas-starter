@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Sparkles, BookOpen, Loader2, Target, BarChart3, Lightbulb,
@@ -98,6 +98,15 @@ export default function BrandStoryPage() {
   const [aiModel, setAiModel] = useState('Qwen/Qwen2.5-32B-Instruct');
   const [showAiConfig, setShowAiConfig] = useState(false);
   const [serverAiConfig, setServerAiConfig] = useState<{ provider: string; isConfigured: boolean } | null>(null);
+  const [selectedBrandId, setSelectedBrandId] = useState<number | null>(null);
+  const [brands, setBrands] = useState<{ id: number; name: string; industry: string | null; description: string | null; tone: string | null; values: string[] }[]>([]);
+
+  useEffect(() => {
+    fetch('/api/brands')
+      .then(res => res.json())
+      .then(data => { if (data.brands) setBrands(data.brands); })
+      .catch(() => {});
+  }, []);
 
   const nameError = touched.name && !formData.productName.trim() ? '请输入产品名称' : '';
   const descError = touched.desc && !formData.productDesc.trim() ? '请输入产品描述' : '';
@@ -115,24 +124,10 @@ export default function BrandStoryPage() {
     setStreamingText('');
     setProgressStages(WORKFLOW_STAGES.map((s, i) => ({ label: s.label, desc: s.desc, status: i === 0 ? 'active' : 'pending' as const })));
 
-    let stageIndex = 0;
-    const stageTimer = setInterval(() => {
-      if (stageIndex < WORKFLOW_STAGES.length) {
-        setGeneratingStep(WORKFLOW_STAGES[stageIndex].label);
-        setProgress(Math.round(((stageIndex + 1) / WORKFLOW_STAGES.length) * 100));
-        setProgressStages(prev => prev.map((s, i) =>
-          i < stageIndex ? { ...s, status: 'done' as const } :
-          i === stageIndex ? { ...s, status: 'active' as const } :
-          s
-        ));
-        stageIndex++;
-      }
-    }, 3000);
-
     abortRef.current = new AbortController();
 
     try {
-      const response = await fetch('/api/brand-story/generate', {
+      const response = await fetch('/api/brand-story/generate-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: abortRef.current.signal,
@@ -143,6 +138,7 @@ export default function BrandStoryPage() {
           productFeatures: formData.productFeatures.split('\n').filter(f => f.trim()),
           template,
           tone,
+          brandId: selectedBrandId,
           provider: aiProvider,
           apiKey: aiApiKey || undefined,
           baseUrl: aiBaseUrl || undefined,
@@ -150,40 +146,90 @@ export default function BrandStoryPage() {
         }),
       });
 
-      const data = await response.json();
-      clearInterval(stageTimer);
-
-      if (data.error) {
-        setError(data.error);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        setError(errData.error || `请求失败 (${response.status})`);
         setStep(2);
         return;
       }
 
-      setProgress(100);
-      setGeneratingStep('创作完成');
-      setProgressStages(prev => prev.map(s => ({ ...s, status: 'done' as const })));
-      setResult(data.data);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        setError('无法获取响应流');
+        setStep(2);
+        return;
+      }
 
-      try {
-        const historyItem = {
-          id: Date.now().toString(),
-          productName: formData.productName,
-          productDesc: formData.productDesc,
-          template,
-          tone,
-          targetUser: formData.targetUser,
-          result: data.data,
-          isFavorite: false,
-          rating: 0,
-          createdAt: new Date().toISOString(),
-        };
-        const existing = JSON.parse(localStorage.getItem('brand-story-history') || '[]');
-        localStorage.setItem('brand-story-history', JSON.stringify([historyItem, ...existing]));
-      } catch {}
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      setTimeout(() => setStep(4), 500);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+
+          try {
+            const event = JSON.parse(data);
+
+            switch (event.type) {
+              case 'stage_start':
+                setGeneratingStep(event.stageName || event.stage);
+                setProgress(event.progress || 0);
+                setProgressStages(prev => prev.map((s, i) =>
+                  i < (event.stageIndex || 0) ? { ...s, status: 'done' as const } :
+                  i === (event.stageIndex || 0) ? { ...s, status: 'active' as const } :
+                  s
+                ));
+                setStreamingText('');
+                break;
+
+              case 'stream_chunk':
+                if (event.chunk) {
+                  setStreamingText(prev => prev + event.chunk);
+                  setProgress(event.progress || 0);
+                }
+                break;
+
+              case 'stage_complete':
+                setProgress(event.progress || 0);
+                setProgressStages(prev => prev.map((s, i) =>
+                  i <= (event.stageIndex || 0) ? { ...s, status: 'done' as const } :
+                  i === (event.stageIndex || 0) + 1 ? { ...s, status: 'active' as const } :
+                  s
+                ));
+                break;
+
+              case 'stage_error':
+                setError(event.error || '阶段处理失败');
+                break;
+
+              case 'done':
+                setProgress(100);
+                setGeneratingStep('创作完成');
+                setProgressStages(prev => prev.map(s => ({ ...s, status: 'done' as const })));
+                if (event.result) {
+                  setResult(event.result);
+                }
+                setTimeout(() => setStep(4), 500);
+                break;
+
+              case 'error':
+                setError(event.error || '生成失败');
+                setStep(2);
+                break;
+            }
+          } catch {}
+        }
+      }
     } catch (err: any) {
-      clearInterval(stageTimer);
       if (err.name !== 'AbortError') {
         setError(err.message || '生成失败，请重试');
         setStep(2);
@@ -450,6 +496,24 @@ export default function BrandStoryPage() {
                 </select>
               </div>
             </div>
+
+            {brands.length > 0 && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-800 mb-2">
+                  关联品牌 <span className="text-gray-400 font-normal">（选填，从品牌库选择）</span>
+                </label>
+                <select
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#667eea]/20 focus:border-[#667eea] outline-none transition bg-[#f6f6f6]"
+                  value={selectedBrandId || ''}
+                  onChange={(e) => setSelectedBrandId(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">不关联品牌</option>
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name}{b.industry ? ` (${b.industry})` : ''}</option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm mt-5">

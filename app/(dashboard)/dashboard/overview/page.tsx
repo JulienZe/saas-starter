@@ -1,24 +1,35 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   BarChart3, TrendingUp, Sparkles, Clock, BookOpen, Star,
-  PenLine, Eye, ArrowRight, Zap, Heart, Activity
+  PenLine, Eye, ArrowRight, Zap, Heart, Activity, Loader2
 } from 'lucide-react';
 import Link from 'next/link';
 
-interface HistoryItem {
-  id: string;
-  productName: string;
-  productDesc: string;
+interface DBStory {
+  id: number;
+  productName: string | null;
+  productDesc: string | null;
   template: string | null;
-  tone: string;
-  targetUser: string;
-  result: any;
-  isFavorite: boolean;
+  tone: string | null;
+  targetUser: string | null;
+  resultData: any;
+  isFavorite: number;
   rating: number;
+  wordCount: number | null;
+  provider: string | null;
+  model: string | null;
+  content: string | null;
   createdAt: string;
+}
+
+interface Stats {
+  total: number;
+  totalWords: number;
+  avgWords: number;
+  favCount: number;
 }
 
 const TEMPLATES: Record<string, { name: string; icon: string }> = {
@@ -39,69 +50,61 @@ const TONES: Record<string, string> = {
 };
 
 export default function DashboardPage() {
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [mounted, setMounted] = useState(false);
+  const [stories, setStories] = useState<DBStory[]>([]);
+  const [stats, setStats] = useState<Stats>({ total: 0, totalWords: 0, avgWords: 0, favCount: 0 });
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setMounted(true);
-    try {
-      const data = JSON.parse(localStorage.getItem('brand-story-history') || '[]');
-      setHistory(data);
-    } catch {}
+    async function fetchData() {
+      try {
+        const res = await fetch('/api/stories');
+        const data = await res.json();
+        if (data.stories) setStories(data.stories);
+        if (data.stats) setStats(data.stats);
+      } catch (err) {
+        console.error('加载数据失败:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchData();
   }, []);
 
-  const stats = useMemo(() => {
-    const total = history.length;
-    const thisWeek = history.filter(h => {
-      const d = new Date(h.createdAt);
-      const now = new Date();
-      const diff = now.getTime() - d.getTime();
-      return diff < 7 * 24 * 60 * 60 * 1000;
+  const thisWeek = stories.filter(s => {
+    const d = new Date(s.createdAt);
+    const diff = Date.now() - d.getTime();
+    return diff < 7 * 24 * 60 * 60 * 1000;
+  }).length;
+
+  const templateDist: Record<string, number> = {};
+  stories.forEach(s => {
+    const key = s.template || 'other';
+    templateDist[key] = (templateDist[key] || 0) + 1;
+  });
+
+  const last7Days: { date: string; count: number }[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
+    const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+    const count = stories.filter(s => {
+      const t = new Date(s.createdAt).getTime();
+      return t >= dayStart && t < dayEnd;
     }).length;
-    const avgRating = total > 0
-      ? (history.reduce((sum, h) => sum + (h.rating || 0), 0) / total).toFixed(1)
-      : '0.0';
-    const totalWords = history.reduce((sum, h) => sum + (h.result?.brandStory?.wordCount || 0), 0);
-    const favorites = history.filter(h => h.isFavorite).length;
+    last7Days.push({ date: dateStr, count });
+  }
 
-    const templateDist: Record<string, number> = {};
-    history.forEach(h => {
-      const key = h.template || 'other';
-      templateDist[key] = (templateDist[key] || 0) + 1;
-    });
-
-    const toneDist: Record<string, number> = {};
-    history.forEach(h => {
-      const key = h.tone || 'warm_professional';
-      toneDist[key] = (toneDist[key] || 0) + 1;
-    });
-
-    const last7Days: { date: string; count: number }[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
-      const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-      const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-      const count = history.filter(h => {
-        const t = new Date(h.createdAt).getTime();
-        return t >= dayStart && t < dayEnd;
-      }).length;
-      last7Days.push({ date: dateStr, count });
-    }
-
-    return { total, thisWeek, avgRating, totalWords, favorites, templateDist, toneDist, last7Days };
-  }, [history]);
-
-  if (!mounted) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="w-8 h-8 border-2 border-[#667eea] border-t-transparent rounded-full animate-spin" />
+        <Loader2 className="w-8 h-8 text-[#667eea] animate-spin" />
       </div>
     );
   }
 
-  const maxCount = Math.max(...stats.last7Days.map(d => d.count), 1);
+  const maxCount = Math.max(...last7Days.map(d => d.count), 1);
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
@@ -126,9 +129,9 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         {[
           { label: '总创作数', value: stats.total, icon: BookOpen, gradient: 'from-[#667eea] to-[#764ba2]' },
-          { label: '本周创作', value: stats.thisWeek, icon: TrendingUp, gradient: 'from-[#5a72d8] to-[#667eea]' },
+          { label: '本周创作', value: thisWeek, icon: TrendingUp, gradient: 'from-[#5a72d8] to-[#667eea]' },
           { label: '总字数', value: stats.totalWords.toLocaleString(), icon: PenLine, gradient: 'from-[#764ba2] to-[#9b6fbf]' },
-          { label: '收藏数', value: stats.favorites, icon: Heart, gradient: 'from-pink-500 to-rose-500' },
+          { label: '收藏数', value: stats.favCount, icon: Heart, gradient: 'from-pink-500 to-rose-500' },
         ].map((stat) => {
           const StatIcon = stat.icon;
           return (
@@ -151,10 +154,10 @@ export default function DashboardPage() {
             <h3 className="font-semibold text-gray-900 flex items-center gap-2">
               <Activity className="w-4 h-4 text-[#667eea]" /> 近7天创作趋势
             </h3>
-            <span className="text-xs text-gray-400">共 {stats.thisWeek} 篇</span>
+            <span className="text-xs text-gray-400">共 {thisWeek} 篇</span>
           </div>
           <div className="flex items-end gap-3 h-40">
-            {stats.last7Days.map((day, i) => (
+            {last7Days.map((day, i) => (
               <div key={i} className="flex-1 flex flex-col items-center gap-2">
                 <span className="text-xs font-semibold text-gray-700">{day.count}</span>
                 <div className="w-full relative" style={{ height: '120px' }}>
@@ -178,9 +181,9 @@ export default function DashboardPage() {
           <h3 className="font-semibold text-gray-900 mb-5 flex items-center gap-2">
             <BarChart3 className="w-4 h-4 text-[#667eea]" /> 模板分布
           </h3>
-          {Object.keys(stats.templateDist).length > 0 ? (
+          {Object.keys(templateDist).length > 0 ? (
             <div className="space-y-3">
-              {Object.entries(stats.templateDist)
+              {Object.entries(templateDist)
                 .sort((a, b) => b[1] - a[1])
                 .map(([key, count]) => {
                   const tpl = TEMPLATES[key];
@@ -224,11 +227,11 @@ export default function DashboardPage() {
           </Link>
         </div>
 
-        {history.length > 0 ? (
+        {stories.length > 0 ? (
           <div className="divide-y divide-gray-100">
-            {history.slice(0, 5).map((item) => {
+            {stories.slice(0, 5).map((item) => {
               const tpl = item.template ? TEMPLATES[item.template] : null;
-              const toneName = TONES[item.tone] || item.tone;
+              const toneName = item.tone ? (TONES[item.tone] || item.tone) : '';
               return (
                 <div key={item.id} className="flex items-center gap-4 px-6 py-4 hover:bg-gray-50/50 transition-colors">
                   <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#667eea]/10 to-[#764ba2]/10 flex items-center justify-center text-lg flex-shrink-0">
@@ -236,8 +239,8 @@ export default function DashboardPage() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <p className="font-medium text-gray-900 text-sm truncate">{item.productName}</p>
-                      {item.isFavorite && <Heart className="w-3 h-3 text-pink-500 fill-pink-500 flex-shrink-0" />}
+                      <p className="font-medium text-gray-900 text-sm truncate">{item.productName || '未命名'}</p>
+                      {item.isFavorite ? <Heart className="w-3 h-3 text-pink-500 fill-pink-500 flex-shrink-0" /> : null}
                     </div>
                     <p className="text-xs text-gray-400 mt-0.5 truncate">{item.productDesc}</p>
                   </div>
@@ -245,7 +248,7 @@ export default function DashboardPage() {
                     {tpl && (
                       <span className="text-xs px-2 py-0.5 rounded-full bg-gradient-to-r from-[#667eea]/5 to-[#764ba2]/5 text-[#667eea]">{tpl.name}</span>
                     )}
-                    <span className="text-xs text-gray-400">{toneName}</span>
+                    {toneName && <span className="text-xs text-gray-400">{toneName}</span>}
                     <div className="flex items-center gap-0.5">
                       {item.rating > 0 ? (
                         <>

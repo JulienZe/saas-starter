@@ -66,13 +66,24 @@ export async function POST(request: NextRequest) {
       });
 
       if (team) {
+        const content = result.brandStory?.content || '';
         await db.insert(stories).values({
           teamId: team.teamId,
           brandId: brandId || null,
           title: `${productName} - 品牌故事`,
-          content: result.brandStory?.content || '',
+          content,
           style: template || 'brand_story',
           status: 'draft',
+          productName,
+          productDesc,
+          targetUser: targetUser || null,
+          productFeatures: productFeatures ? JSON.stringify(productFeatures) : null,
+          tone: tone || null,
+          template: template || null,
+          resultData: JSON.stringify(result),
+          wordCount: content.length,
+          provider: resolvedProvider,
+          model: resolvedModel || null,
         });
       }
     } catch (dbError) {
